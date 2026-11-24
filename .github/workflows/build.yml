@@ -1,0 +1,443 @@
+name: Build PulseLegit
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup
+        run: |
+          shopt -s dotglob
+          if [ -f pulselegit-template-1.21.1.zip ]; then
+            unzip -q pulselegit-template-1.21.1.zip -d _t
+            mv _t/*/* . 2>/dev/null || mv _t/* .
+            rm -rf _t *.zip
+          fi
+          D="src/client/java/com/pulselegit"
+          [ ! -d "src/client/java" ] && D="src/main/java/com/pulselegit"
+          mkdir -p "$D"
+          cat << 'EOF' > "$D/PulseLegitClient.java"
+          package com.pulselegit;
+          import com.google.gson.*;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.*;
+          import net.fabricmc.fabric.api.client.keybinding.v1.*;
+          import net.fabricmc.fabric.api.client.rendering.v1.*;
+          import net.fabricmc.fabric.api.event.player.*;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.*;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.network.*;
+          import net.minecraft.client.option.*;
+          import net.minecraft.client.render.*;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.entity.*;
+          import net.minecraft.entity.effect.StatusEffects;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.particle.*;
+          import net.minecraft.sound.*;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.ActionResult;
+          import net.minecraft.util.math.*;
+          import org.joml.Matrix4f;
+          import org.lwjgl.glfw.GLFW;
+          import java.io.*;
+          import java.util.*;
+
+          public class PulseLegitClient implements ClientModInitializer {
+              record Jmp(double x, double y, double z, long t) {}
+              public static class Cfg {
+                  public boolean hud=true, targetHud=true, armor=true;
+                  public boolean keys=true, cross=true, streamer=false;
+                  public boolean crit=true, fps=false, parts=true;
+                  public boolean sprint=true, marker=true, hat=true;
+                  public boolean halo=false, circles=true, time=false;
+                  public int sound=0, tx=460, ty=260;
+                  public float vol=1f, pitch=1.2f;
+                  public long wTime=18000L;
+              }
+              public static Cfg cfg = new Cfg();
+              static File f = new File(
+                  FabricLoader.getInstance().getConfigDir().toFile(),
+                  "pulselegit.json");
+              static Gson g = new GsonBuilder().setPrettyPrinting().create();
+              static void save() {
+                  try (FileWriter w = new FileWriter(f)) {
+                      g.toJson(cfg, w);
+                  } catch (Exception ignored) {}
+              }
+              static void load() {
+                  if (f.exists()) {
+                      try (FileReader r = new FileReader(f)) {
+                          Cfg l = g.fromJson(r, Cfg.class);
+                          if (l != null) cfg = l;
+                      } catch (Exception ignored) {}
+                  } else save();
+              }
+              static AbstractClientPlayerEntity tgt;
+              static long hitT, savedT;
+              static boolean og = true, fpsOn = false;
+              static List<Jmp> circs = new ArrayList<>();
+              static void playCrit() {
+                  MinecraftClient c = MinecraftClient.getInstance();
+                  if (c.player == null || c.world == null) return;
+                  SoundEvent s = switch (cfg.sound) {
+                      case 1 -> SoundEvents.BLOCK_NOTE_BLOCK_BELL.value();
+                      case 2 -> SoundEvents.BLOCK_AMETHYST_BLOCK_CHIME;
+                      case 3 -> SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP;
+                      default -> SoundEvents.ENTITY_ARROW_HIT_PLAYER;
+                  };
+                  c.world.playSound(c.player, c.player.getX(),
+                      c.player.getY(), c.player.getZ(), s,
+                      SoundCategory.PLAYERS, cfg.vol, cfg.pitch);
+              }
+
+              @Override
+              public void onInitializeClient() {
+                  load();
+                  KeyBinding key = KeyBindingHelper.registerKeyBinding(
+                      new KeyBinding("key.pulselegit.gui",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_RIGHT_SHIFT, "PulseVisuals"));
+                  AttackEntityCallback.EVENT.register(
+                      (p, w, h, e, hr) -> {
+                      if (w.isClient()) {
+                          if (e instanceof AbstractClientPlayerEntity ap &&
+                              ap != p && !ap.isInvisible() &&
+                              !ap.isInvisibleTo(p)) {
+                              tgt = ap;
+                              hitT = System.currentTimeMillis();
+                          }
+                          if (cfg.crit && e instanceof LivingEntity &&
+                              p.fallDistance > 0 && !p.isOnGround() &&
+                              !p.isClimbing() && !p.isTouchingWater() &&
+                              !p.hasStatusEffect(StatusEffects.BLINDNESS) &&
+                              !p.hasVehicle() &&
+                              p.getAttackCooldownProgress(0.5F) > 0.9F) {
+                              playCrit();
+                          }
+                          if (cfg.parts && !cfg.fps) {
+                              for (int i = 0; i < 8; i++) {
+                                  w.addParticle(ParticleTypes.WITCH,
+                                      e.getX()+(w.random.nextDouble()-0.5),
+                                      e.getY()+e.getHeight()*0.6,
+                                      e.getZ()+(w.random.nextDouble()-0.5),
+                                      0, 0.05, 0);
+                              }
+                          }
+                      }
+                      return ActionResult.PASS;
+                  });
+                  ClientTickEvents.END_CLIENT_TICK.register(c -> {
+                      while (key.wasPressed()) c.setScreen(new Gui());
+                      if (c.options != null && cfg.fps != fpsOn) {
+                          c.options.getCloudRenderMode().setValue(
+                              cfg.fps ? CloudRenderMode.OFF :
+                              CloudRenderMode.FANCY);
+                          c.options.getParticles().setValue(
+                              cfg.fps ? ParticlesMode.MINIMAL :
+                              ParticlesMode.ALL);
+                          c.options.getBiomeBlendRadius().setValue(
+                              cfg.fps ? 0 : 2);
+                          fpsOn = cfg.fps;
+                      }
+                      if (c.player == null || c.world == null) return;
+                      if (cfg.circles) {
+                          boolean gnd = c.player.isOnGround();
+                          if (og && !gnd && c.player.getVelocity().y > 0.1) {
+                              circs.add(new Jmp(c.player.getX(),
+                                  c.player.getY()+0.02, c.player.getZ(),
+                                  System.currentTimeMillis()));
+                          }
+                          og = gnd;
+                      }
+                      if (cfg.sprint && c.options.forwardKey.isPressed() &&
+                          !c.player.isSneaking()) {
+                          c.player.setSprinting(true);
+                      }
+                      if (cfg.time) c.world.setTimeOfDay(cfg.wTime);
+                  });
+
+                  HudRenderCallback.EVENT.register((ctx, tc) -> {
+                      MinecraftClient c = MinecraftClient.getInstance();
+                      if (c.player == null || c.options.hudHidden) return;
+                      int sw = c.getWindow().getScaledWidth();
+                      int sh = c.getWindow().getScaledHeight();
+                      if (cfg.hud) {
+                          String u = cfg.streamer ? "Hidden" :
+                              c.player.getName().getString();
+                          String t = "PULSE VISUALS | " + u + " | " +
+                              c.getCurrentFps() + " FPS";
+                          int w = c.textRenderer.getWidth(t);
+                          ctx.fill(6, 6, 14+w, 22, 0xDC101018);
+                          ctx.fill(6, 6, 14+w, 8, 0xFF8B5CF6);
+                          ctx.drawTextWithShadow(
+                              c.textRenderer, t, 10, 11, -1);
+                      }
+                      if (cfg.armor) {
+                          int x = sw/2+12, o = 0;
+                          for (ItemStack it : c.player.getArmorItems()) {
+                              if (!it.isEmpty()) {
+                                  ctx.drawItem(it, x+o, sh-56);
+                                  ctx.drawStackOverlay(
+                                      c.textRenderer, it, x+o, sh-56);
+                                  o += 18;
+                              }
+                          }
+                      }
+                      if (cfg.keys) {
+                          String[] k = {"W","A","S","D"};
+                          int[] dx = {32,10,32,54};
+                          int[] dy = {sh-72,sh-50,sh-50,sh-50};
+                          boolean[] pr = {
+                              c.options.forwardKey.isPressed(),
+                              c.options.leftKey.isPressed(),
+                              c.options.backKey.isPressed(),
+                              c.options.rightKey.isPressed()};
+                          for (int i = 0; i < 4; i++) {
+                              ctx.fill(dx[i], dy[i], dx[i]+20, dy[i]+20,
+                                  pr[i] ? 0xCC8B5CF6 : 0xB0101018);
+                              ctx.drawBorder(dx[i], dy[i],
+                                  20, 20, 0x607C3AED);
+                              ctx.drawTextWithShadow(c.textRenderer,
+                                  k[i], dx[i]+7, dy[i]+6, -1);
+                          }
+                      }
+                      if (cfg.cross &&
+                          c.options.getPerspective().isFirstPerson()) {
+                          int cx = sw/2, cy = sh/2;
+                          ctx.fill(cx-5, cy, cx-2, cy+1, 0xFFA855F7);
+                          ctx.fill(cx+3, cy, cx+6, cy+1, 0xFFA855F7);
+                          ctx.fill(cx, cy-5, cx+1, cy-2, 0xFFA855F7);
+                          ctx.fill(cx, cy+3, cx+1, cy+6, 0xFFA855F7);
+                      }
+                      if (!(c.currentScreen instanceof Gui)) {
+                          drawTarget(ctx, c, false);
+                      }
+                  });
+                  WorldRenderEvents.AFTER_ENTITIES.register(ctx -> {
+                      MinecraftClient c = MinecraftClient.getInstance();
+                      if (c.player == null || ctx.consumers() == null)
+                          return;
+                      MatrixStack ms = ctx.matrixStack();
+                      Vec3d cam = ctx.camera().getPos();
+                      float td = ctx.tickCounter().getTickDelta(true);
+                      VertexConsumer b = ctx.consumers().getBuffer(
+                          RenderLayer.getLines());
+                      if (cfg.marker && tgt != null &&
+                          System.currentTimeMillis()-hitT < 3500L &&
+                          tgt.isAlive() && !tgt.isInvisible()) {
+                          ms.push();
+                          ms.translate(
+                              MathHelper.lerp(td,tgt.prevX,tgt.getX())-cam.x,
+                              MathHelper.lerp(td,tgt.prevY,tgt.getY())-cam.y+
+                              tgt.getHeight()*0.52,
+                              MathHelper.lerp(td,tgt.prevZ,tgt.getZ())-cam.z);
+                          ms.multiply(ctx.camera().getRotation());
+                          ms.multiply(RotationAxis.POSITIVE_Z.rotationDegrees(
+                              (System.currentTimeMillis()%3600L)/10f));
+                          float s = 0.42f + 0.05f*MathHelper.sin(
+                              System.currentTimeMillis()/150f);
+                          MatrixStack.Entry e = ms.peek();
+                          Matrix4f m = e.getPositionMatrix();
+                          ln(b,e,m,-s,-s,0,s,-s,0,0.96f,0.18f,0.18f,1f);
+                          ln(b,e,m,s,-s,0,s,s,0,0.96f,0.18f,0.18f,1f);
+                          ln(b,e,m,s,s,0,-s,s,0,0.96f,0.18f,0.18f,1f);
+                          ln(b,e,m,-s,s,0,-s,-s,0,0.96f,0.18f,0.18f,1f);
+                          ms.pop();
+                      }
+                      if (!c.options.getPerspective().isFirstPerson()) {
+                          double px = MathHelper.lerp(td,
+                              c.player.prevX,c.player.getX())-cam.x;
+                          double py = MathHelper.lerp(td,
+                              c.player.prevY,c.player.getY())-cam.y+
+                              c.player.getHeight()+0.05;
+                          double pz = MathHelper.lerp(td,
+                              c.player.prevZ,c.player.getZ())-cam.z;
+                          if (cfg.hat) ring(ms,b,px,py,pz,
+                              0.58f,0.3f,0.66f,0.33f,0.97f,0.95f);
+                          if (cfg.halo) ring(ms,b,px,py+0.22,pz,
+                              0.32f,0f,0.75f,0.45f,1f,0.95f);
+                      }
+                      if (cfg.circles) {
+                          circs.removeIf(ar -> {
+                              long age = System.currentTimeMillis()-ar.t();
+                              if (age > 900) return true;
+                              float p = age/900f;
+                              ring(ms,b,ar.x()-cam.x,ar.y()-cam.y,
+                                  ar.z()-cam.z,0.2f+p*1.1f,0f,
+                                  0.66f,0.33f,0.97f,1f-p);
+                              return false;
+                          });
+                      }
+                  });
+              }
+
+              static void drawTarget(DrawContext ctx,
+                  MinecraftClient c, boolean menu) {
+                  if (!cfg.targetHud) return;
+                  AbstractClientPlayerEntity p = menu ? c.player :
+                      (tgt != null && System.currentTimeMillis()-hitT < 3500L &&
+                      tgt.isAlive() && !tgt.isInvisible() ? tgt : null);
+                  if (p == null) return;
+                  ctx.fill(cfg.tx, cfg.ty, cfg.tx+132, cfg.ty+36, 0xE0101018);
+                  ctx.drawBorder(cfg.tx, cfg.ty, 132, 36, 0xFFA855F7);
+                  ctx.fill(cfg.tx, cfg.ty, cfg.tx+2, cfg.ty+36, 0xFF8B5CF6);
+                  PlayerSkinDrawer.draw(ctx, p.getSkinTextures(),
+                      cfg.tx+6, cfg.ty+6, 24);
+                  ctx.drawTextWithShadow(c.textRenderer,
+                      p.getName().getString(), cfg.tx+36, cfg.ty+7, -1);
+                  float r = MathHelper.clamp(
+                      p.getHealth()/p.getMaxHealth(), 0f, 1f);
+                  ctx.fill(cfg.tx+36, cfg.ty+21,
+                      cfg.tx+124, cfg.ty+27, 0xFF1F1F2E);
+                  ctx.fill(cfg.tx+36, cfg.ty+21,
+                      cfg.tx+36+(int)(88*r), cfg.ty+27, 0xFF8B5CF6);
+              }
+
+              static void ring(MatrixStack ms, VertexConsumer b,
+                  double x, double y, double z, float rad, float h,
+                  float r, float g, float bl, float a) {
+                  ms.push(); ms.translate(x,y,z);
+                  MatrixStack.Entry e = ms.peek();
+                  Matrix4f m = e.getPositionMatrix();
+                  for (int i = 0; i < 32; i++) {
+                      double a1 = 2*Math.PI*i/32;
+                      double a2 = 2*Math.PI*(i+1)/32;
+                      float x1 = (float)Math.cos(a1)*rad;
+                      float z1 = (float)Math.sin(a1)*rad;
+                      float x2 = (float)Math.cos(a2)*rad;
+                      float z2 = (float)Math.sin(a2)*rad;
+                      ln(b,e,m,x1,0,z1,x2,0,z2,r,g,bl,a);
+                      if (h > 0 && i % 2 == 0) {
+                          ln(b,e,m,x1,0,z1,0,h,0,r,g,bl,a*0.7f);
+                      }
+                  }
+                  ms.pop();
+              }
+
+              static void ln(VertexConsumer b, MatrixStack.Entry e,
+                  Matrix4f m, float x1, float y1, float z1,
+                  float x2, float y2, float z2,
+                  float r, float g, float bl, float a) {
+                  b.vertex(m,x1,y1,z1).color(r,g,bl,a).normal(e,0,1,0);
+                  b.vertex(m,x2,y2,z2).color(r,g,bl,a).normal(e,0,1,0);
+              }
+
+              public static class Gui extends Screen {
+                  boolean drag = false; int dx, dy;
+                  public Gui() { super(Text.literal("Pulse Visuals")); }
+                  String[] names = {
+                      "Watermark", "Target HUD", "Armor HUD", "Keystrokes",
+                      "Crosshair", "Streamer Mode", "Crit Sound",
+                      "Звук крита (клик)", "FPS Boost", "Hit Particles",
+                      "Toggle Sprint", "Красный квадрат", "China Hat",
+                      "Neon Halo", "Jump Circles", "Своё время суток"};
+                  @Override
+                  public void render(DrawContext ctx, int mx, int my, float d) {
+                      ctx.fill(0, 0, width, height, 0x7507070D);
+                      int x = (width-360)/2, y = (height-250)/2;
+                      ctx.fill(x, y, x+360, y+250, 0xF20D0D14);
+                      ctx.drawBorder(x, y, 360, 250, 0xFF8B5CF6);
+                      ctx.drawTextWithShadow(textRenderer,
+                          "PULSE VISUALS", x+12, y+10, 0xFFA855F7);
+                      boolean sv = System.currentTimeMillis()-savedT < 1500;
+                      ctx.fill(x+210, y+6, x+285, y+22,
+                          sv ? 0xFF16A34A : 0xFF6D28D9);
+                      ctx.drawTextWithShadow(textRenderer,
+                          sv ? "Сохранено!" : "Сохранить", x+218, y+10, -1);
+                      ctx.fill(x+292, y+6, x+350, y+22, 0xFF252538);
+                      ctx.drawTextWithShadow(textRenderer,
+                          "Закрыть", x+301, y+10, -1);
+                      boolean[] st = {
+                          cfg.hud, cfg.targetHud, cfg.armor, cfg.keys,
+                          cfg.cross, cfg.streamer, cfg.crit, true,
+                          cfg.fps, cfg.parts, cfg.sprint, cfg.marker,
+                          cfg.hat, cfg.halo, cfg.circles, cfg.time};
+                      for (int i = 0; i < names.length; i++) {
+                          int cx = x+12+(i%2)*172, cy = y+32+(i/2)*25;
+                          ctx.fill(cx, cy, cx+164, cy+21,
+                              st[i] ? 0xFF1A1A2E : 0xFF13131E);
+                          ctx.drawBorder(cx, cy, 164, 21,
+                              st[i] ? 0xFF8B5CF6 : 0x30FFFFFF);
+                          ctx.drawTextWithShadow(textRenderer,
+                              names[i], cx+6, cy+6, st[i] ? -1 : 0xFF9CA3AF);
+                      }
+                      drawTarget(ctx, MinecraftClient.getInstance(), true);
+                  }
+
+                  @Override
+                  public boolean mouseClicked(double mx, double my, int b) {
+                      if (cfg.targetHud && mx >= cfg.tx && mx <= cfg.tx+132 &&
+                          my >= cfg.ty && my <= cfg.ty+36) {
+                          drag = true; dx = (int)mx-cfg.tx;
+                          dy = (int)my-cfg.ty; return true;
+                      }
+                      int x = (width-360)/2, y = (height-250)/2;
+                      if (mx >= x+210 && mx <= x+285 &&
+                          my >= y+6 && my <= y+22) {
+                          save(); savedT = System.currentTimeMillis();
+                          return true;
+                      }
+                      if (mx >= x+292 && mx <= x+350 &&
+                          my >= y+6 && my <= y+22) {
+                          save(); close(); return true;
+                      }
+                      for (int i = 0; i < names.length; i++) {
+                          int cx = x+12+(i%2)*172, cy = y+32+(i/2)*25;
+                          if (mx >= cx && mx <= cx+164 &&
+                              my >= cy && my <= cy+21) {
+                              switch (i) {
+                                  case 0 -> cfg.hud = !cfg.hud;
+                                  case 1 -> cfg.targetHud = !cfg.targetHud;
+                                  case 2 -> cfg.armor = !cfg.armor;
+                                  case 3 -> cfg.keys = !cfg.keys;
+                                  case 4 -> cfg.cross = !cfg.cross;
+                                  case 5 -> cfg.streamer = !cfg.streamer;
+                                  case 6 -> cfg.crit = !cfg.crit;
+                                  case 7 -> { cfg.sound=(cfg.sound+1)%4;
+                                              playCrit(); }
+                                  case 8 -> cfg.fps = !cfg.fps;
+                                  case 9 -> cfg.parts = !cfg.parts;
+                                  case 10 -> cfg.sprint = !cfg.sprint;
+                                  case 11 -> cfg.marker = !cfg.marker;
+                                  case 12 -> cfg.hat = !cfg.hat;
+                                  case 13 -> cfg.halo = !cfg.halo;
+                                  case 14 -> cfg.circles = !cfg.circles;
+                                  case 15 -> cfg.time = !cfg.time;
+                              }
+                              save(); return true;
+                          }
+                      }
+                      return super.mouseClicked(mx, my, b);
+                  }
+                  @Override
+                  public boolean mouseDragged(double mx, double my,
+                      int b, double dx2, double dy2) {
+                      if (drag) {
+                          cfg.tx = (int)mx-dx; cfg.ty = (int)my-dy;
+                          return true;
+                      }
+                      return super.mouseDragged(mx, my, b, dx2, dy2);
+                  }
+                  @Override
+                  public boolean mouseReleased(double mx, double my, int b) {
+                      if (drag) { drag = false; save(); return true; }
+                      return super.mouseReleased(mx, my, b);
+                  }
+                  @Override
+                  public boolean shouldPause() { return false; }
+              }
+          }
+          EOF
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - run: chmod +x gradlew && ./gradlew build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pulselegit-1.21.1
+          path: build/libs/*.jar
